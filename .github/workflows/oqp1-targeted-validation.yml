@@ -1,0 +1,70 @@
+name: OQP1 targeted build and axiom audit
+
+on:
+  push:
+    branches: [oqp1-ci-20261012]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      LEAN_NUM_THREADS: '4'
+    steps:
+      - name: Check out exact draft commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: 4a8578af5c18942193ac8356db4714b438d4fedc
+          persist-credentials: false
+      - name: Record identity
+        run: |
+          git rev-parse HEAD
+          cat lean-toolchain
+          sha256sum FormalConjectures/OpenQuantumProblems/1.lean
+      - name: Install elan
+        run: |
+          set -o pipefail
+          curl -sSfL https://github.com/leanprover/elan/releases/download/v1.4.2/elan-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          ./elan-init -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Fetch Mathlib cache
+        run: lake exe cache get
+      - name: Build only OQP 1
+        run: lake --wfail build 'FormalConjectures.OpenQuantumProblems.«1»'
+      - name: Audit all helper theorem axioms
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/OQP1Audit.lean <<'LEAN'
+          import FormalConjectures.OpenQuantumProblems.«1»
+          #print axioms OpenQuantumProblem1.deterministicBehaviour_nonneg
+          #print axioms OpenQuantumProblem1.deterministicBehaviour_sum
+          #print axioms OpenQuantumProblem1.pointMass_isJointDistribution
+          #print axioms OpenQuantumProblem1.jointMarginal_pointMass
+          #print axioms OpenQuantumProblem1.deterministicBehaviour_isLocal
+          #print axioms OpenQuantumProblem1.isLocal_nonneg
+          #print axioms OpenQuantumProblem1.isLocal_sum
+          #print axioms OpenQuantumProblem1.zero_not_isLocal
+          #print axioms OpenQuantumProblem1.BellInequality.value_jointMarginal
+          #print axioms OpenQuantumProblem1.BellInequality.isValid_iff_local
+          LEAN
+          lake env lean /tmp/OQP1Audit.lean | tee /tmp/oqp1-axioms.log
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path('/tmp/oqp1-axioms.log').read_text()
+          reports = re.findall(r"'(OpenQuantumProblem1\.[^']+)' (?:depends on axioms:\s*\[([^\]]*)\]|does not depend on any axioms)", text)
+          if len(reports) != 10:
+              raise SystemExit(f'Expected 10 helper reports; found {len(reports)}.')
+          allowed = {'propext', 'Classical.choice', 'Quot.sound'}
+          for theorem, raw in reports:
+              axioms = {x.strip() for x in raw.split(',') if x.strip()}
+              if axioms - allowed:
+                  raise SystemExit(f'{theorem}: unexpected axioms {axioms - allowed}')
+          print('PASS: 10 helper theorem axiom reports; standard axioms only.')
+          print('The main classification is intentionally admitted, not proved.')
+          PY
